@@ -1,0 +1,276 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=teal!70!black,
+  urlcolor=blue!70!black
+}
+
+\title{\textbf{Craft Crosstalk-48k (HarmonicSlot-TF v3): Unified Single-Pass 48\,kHz Stereo Multi-Voice, Music, and Ambience Separation with Consumer-GPU Inference and Empirical Analysis of Streaming Collapse \& Full-Bin Post-Filtering}}
+
+\author{
+  Independent Open-Source Audio Research (\texttt{Craft Crosstalk-48k})\\
+  \texttt{sachipoonga@gmail.com} \quad|\quad Code, Weights \& ComfyUI Nodes: GitHub Open Release
+}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Real-world film, podcast, and video post-production frequently require isolating multiple simultaneously speaking voices alongside full-band stereo music and room ambience. Existing open-source separation pipelines are fragmented: music separators (e.g., HTDemucs, BS-RoFormer) operate at 44.1--48\,kHz stereo but merge all speakers into a single vocal track, whereas multi-talker speech separators (e.g., SepFormer, TF-GridNet, MossFormer2) operate primarily on 8--16\,kHz mono audio and discard stereo music and ambience. We present \textbf{Craft Crosstalk-48k} (\texttt{HarmonicSlot-TF v3}), a compact 46.13M-parameter (88.0\,MB \texttt{bf16}) single-pass neural separator that jointly decomposes full-band 48\,kHz stereo mixtures into five stems---Voice~1, Voice~2, Voice~3, Music, and Ambience. Our architecture combines an explicit acoustic physics and integer-harmonic comb front-end (\texttt{HarmonicStackGather}), a 74-band variable-width STFT split in six fused einsum groups, an 8-layer Dual-Path 1D-RoPE Encoder, a Decoupled 2-Head Purity-Guided Competitive Slot Query Module, and a 4-layer Permutation-Equivariant Inter-Source Decoder. We further engineer a zero-approximation inference-only path that cuts peak RTX~4060 8\,GB VRAM by 4.4$\times$ ($8.02 \to 1.88$\,GB on 6\,s stereo chunks at $1.84\times$ real-time). Beyond positive Phase-1 results ($9.22$\,dB 2-speaker SI-SDR, $10.14$\,dB 100\%-overlap 2-speaker SI-SDR, $16.7$\,dB SIR, $6.03$\,dB music, $10.09$\,dB ambience at step 17,000), we report two critical \textbf{honest empirical findings}: (1) end-to-end Phase-2 stateful cross-chunk fine-tuning (steps $17\text{k} \to 21\text{k}$) substantially improves synthetic metrics ($5.75$\,dB 3-speaker overlap, $17.4$\,dB SIR, $16.7\%$ gap-swap) yet induces severe single-slot speaker collapse on out-of-domain compressed YouTube shouting audio; and (2) chaining a 17.95\,MB full-1,025-bin 5-reference Conv U-Net post-filter (\texttt{CrossStemDebleedRefiner v2}) reduces pause ghost bleed by $-19.1$\,dB and background vocal leakage by $35$--$42\%$, while plateauing at $+2.2$--$2.4$\,dB SIR on simultaneous active overlap. We release all code, ComfyUI nodes, and all three research checkpoints openly to support reproducible research and community-funded v4 development targeting true simultaneous overlap elimination.
+\end{abstract}
+
+\section{Introduction}
+Studio dialogue editors, podcasters, documentary filmmakers, and video creators routinely face mixtures containing two or three overlapping speakers over full-band stereo music and environmental ambience. Yet open-source neural audio separation remains split across two incompatible silos. High-fidelity music separators such as HTDemucs~\cite{rouard2023hybrid}, BS-RNN~\cite{luo2023music}, and BS-RoFormer~\cite{lu2024music} preserve 44.1--48\,kHz stereo phase and background fidelity, but collapse all human speakers into a single undifferentiated vocal stem. Conversely, multi-speaker speech separation networks such as SepFormer~\cite{subakan2021attention}, TF-GridNet~\cite{wang2023tfgridnet}, and MossFormer2~\cite{zhao2024mossformer2} achieve strong 2--3 talker separation on 8--16\,kHz mono benchmarks, but truncate frequencies above 4--8\,kHz, destroy stereo imaging, and lack explicit Music and Ambience output heads.
+
+Attempting to cascade a music vocal extractor into a 16\,kHz speech separator introduces compound artifacts: vocal extractors drop high-frequency sibilants and bleed reverb across speakers, while resampling to 16\,kHz destroys studio-grade 48\,kHz clarity. Furthermore, most large audio Transformers require datacenter GPUs during inference, preventing adoption by independent creators on 8\,GB laptop GPUs.
+
+In this technical report, we introduce \textbf{Craft Crosstalk-48k} (\texttt{HarmonicSlot-TF v3}) and document the complete engineering arc of an independent, budget-constrained open-source research effort. Our contributions are fourfold:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Unified 48\,kHz Stereo 5-Stem Architecture:} A 46.13M-parameter (\texttt{88.0\,MB bf16}) single-pass network jointly separating up to 3 overlapping voices, full-band Music, and Ambience via explicit integer-harmonic comb gathering, 74-band fused variable-width STFT grouping, Dual-Path 1D-RoPE attention, decoupled 2-head purity-guided competitive slots, and per-(time, band) Inter-Source Decoder attention.
+    \item \textbf{Consumer-GPU Inference Engineering (4.4$\times$ VRAM Reduction):} An exact, zero-retraining inference path that eliminates intermediate slot and decoder spikes, reducing RTX~4060 Laptop 8\,GB VRAM from $8.02$\,GB to $1.88$\,GB on 6\,s stereo chunks ($3.26$\,s wall-clock) and unlocking 10--12\,s chunks.
+    \item \textbf{Chained Full-1,025-Bin 5-Reference Post-Filter \& Systems Findings:} \texttt{CrossStemDebleedRefiner v2} (8.97M params, 17.95\,MB \texttt{bf16}) with deterministic energy-sorted permutation-equivariant multi-reference cancellation, local-RMS waveform de-graining, and a fix for PyTorch cuDNN \texttt{nn.GRU} silent \texttt{fp16} gradient underflow under \texttt{bf16} autocast.
+    \item \textbf{Transparent Failure Analysis for the Audio Community:} Rather than reporting only favorable synthetic benchmarks, we publish exact evidence of (a) Phase-2 streaming single-slot collapse on real compressed YouTube audio despite synthetic gains, and (b) why a 2D Conv U-Net refiner excels at pause/silence scrubbing ($-19.1$\,dB) yet plateaus ($+2.2$--$2.4$\,dB) on simultaneous harmonic overlap---directly motivating our open v4 roadmap.
+\end{enumerate}
+
+\section{Related Work}
+\paragraph{Band-Split Full-Band Separation.} BS-RNN~\cite{luo2023music} and BS-RoFormer~\cite{lu2024music} demonstrated that partitioning high-resolution STFT spectra into variable-width frequency bands enables full-band 44.1--48\,kHz separation with manageable attention complexity. Craft Crosstalk-48k adopts variable-width 74-band partitioning with 1D Rotary Position Embeddings~\cite{su2024roformer}, fuses contiguous equal-width bands into 6 batched CUDA einsum kernels, and extends the paradigm from fixed instrument stems to permutation-invariant multi-talker separation.
+
+\paragraph{Multi-Talker Speech Separation \& Slot Attention.} Permutation-Invariant Training (uPIT)~\cite{kolbaek2017multitalker} enabled blind multi-speaker separation, later scaled by Dual-Path Transformers~\cite{subakan2021attention}, TF-GridNet~\cite{wang2023tfgridnet}, and MossFormer2~\cite{zhao2024mossformer2}. Object-centric Slot Attention~\cite{locatello2020object} provides an elegant iterative bottleneck for separating variable numbers of sources. We adapt competitive slot attention with a decoupled 2-head purity gate so clean single-speaker frames anchor speaker prototypes without starving overlapped frames of conditioning bandwidth.
+
+\paragraph{Post-Filtering \& Residual Enhancement.} Lightweight full-band speech enhancers such as DeepFilterNet3~\cite{schroter2023deepfilternet3} show that compact spectral+waveform post-nets can clean residual noise efficiently. We evaluate this hypothesis directly on multi-speaker crosstalk via a 17.95\,MB full-bin 5-reference complex canceller and document both its strengths and its fundamental harmonic-overlap ceiling.
+
+\section{HarmonicSlot-TF v3 Architecture}
+Craft Crosstalk-48k processes stereo 48\,kHz waveforms $x \in \mathbb{R}^{B \times 2 \times N}$ using an STFT with $n_{\text{fft}}=2048$, hop $H=256$ ($5.33$\,ms), Hann window, and $F=1025$ frequency bins ($23.44$\,Hz spacing up to 24\,kHz Nyquist). Table~\ref{tab:params} summarizes the exact parameter distribution across all 46,130,463 parameters.
+
+\subsection{Acoustic Physics Front-End \& Integer-Harmonic Comb Gather}
+Raw complex STFT coefficients span multiple orders of magnitude and lose pitch-harmonic coherence under standard local convolutions. For every time-frequency bin $(t, f)$, we compute 7 physics-normalized channels ($2C+3$ for stereo):
+\begin{align}
+    X_{\text{comp}}(t,f) &= [\operatorname{Re}(X), \operatorname{Im}(X)] \cdot \frac{\log(1 + |X|)}{|X| + 10^{-6}}, \\
+    \Delta\phi_{\text{IF}}(t,f) &= \frac{\operatorname{atan2}(\sin(\phi_t - \phi_{t-1} - \omega_f), \cos(\phi_t - \phi_{t-1} - \omega_f))}{\pi} \cdot \tanh(10|X|), \\
+    \text{ILD}(t,f) &= \log(1 + |X_L|) - \log(1 + |X_R|), \qquad \text{IPD}_{\cos}(t,f) = \cos(\angle X_L - \angle X_R).
+\end{align}
+Magnitude gating $\Delta\phi_{\text{IF}}$ by $\tanh(10|X|)$ suppresses random phase noise in silent bins. For all low-frequency fundamental bins $f_0 < 1200$\,Hz ($n_{\text{low}}=52$ bins), \texttt{HarmonicStackGather} indexes exact integer multiples $\{1f_0, 2f_0, \dots, 6f_0\}$ across log-magnitude, $\Delta\phi_{\text{IF}}$, ILD, and $\text{IPD}_{\cos}$, projecting the concatenated 24-dim harmonic comb via a 2-layer GELU MLP to $D/2=192$ dimensions. This gives each low-band token direct visibility into a speaker's full harmonic series even under dual-mono mixes ($L=R$, where $\text{ILD}=0$ and $\text{IPD}_{\cos}=1$).
+
+\subsection{Fused 74-Band Split, Dual-Path RoPE Encoder \& Inter-Source Decoder}
+We partition all 1,025 STFT bins into $K=74$ variable-width bands allocating $73\%$ of bands ($54/74$) below $4.6$\,kHz for vocal formants: $26 \times 2$ bins ($0$--$1.22$\,kHz, fused with \texttt{HarmonicStackGather}), $6 \times 2$ bins ($1.22$--$1.5$\,kHz), $22 \times 6$ bins ($1.5$--$4.59$\,kHz), $10 \times 24$ bins ($4.59$--$10.2$\,kHz), $9 \times 64$ bins ($10.2$--$23.7$\,kHz), and $1 \times 13$ bins ($23.7$--$24$\,kHz). Grouping contiguous equal-width bands into 6 batched \texttt{\_GroupedBandEncoder} / \texttt{\_GroupedBandDecoder} einsum kernels eliminates 74 sequential Python loops.
+
+The mixture grid $z \in \mathbb{R}^{B \times T \times 74 \times 384}$ passes through an \textbf{8-layer Dual-Path Encoder} ($D=384$, 8 heads, $d_h=48$). Each block performs (1) band-axis 1D-RoPE self-attention ($\theta=10{,}000$), (2) time-axis bidirectional GRU (hidden $192\times 2$), (3) global frame-level 1D-RoPE time attention over band-averaged frames, and (4) a SiLU FFN ($384 \to 768 \to 384$). Using 1D RoPE instead of learned absolute time embeddings enables seamless generalization across variable chunk lengths ($3.5$\,s to $12$\,s+). After slot conditioning, a \textbf{4-layer Dual-Path Decoder} operates over all $S=5$ stems, replacing global time attention with \textbf{per-$(t,k)$ Permutation-Equivariant Inter-Source Self-Attention} across the 5 stems so overlapping voices and music negotiate spectral ownership across four sequential stages.
+
+\subsection{Decoupled 2-Head Purity-Guided Competitive SlotQueryModule}
+\texttt{SlotQueryModule} ($4.74$M params) discovers up to $V=3$ unknown speakers alongside 2 semantic anchors (Music, Ambience) without relying on fixed speaker ordering. Two auxiliary heads predict (1) 3-class energy fractions $P(\text{speech}, \text{music}, \text{amb})$ whose log-probabilities bias slot competition, and (2) single-speaker dominance $P(\text{solo})$ over speech frames. Crucially, to avoid starving overlapped speech of representational bandwidth, $p_{\text{voice}} = P(\text{speech}) \cdot P(\text{solo})$ weights \emph{only} iterative voiceprint pooling over 3 competitive GRU slot iterations, while final FiLM conditioning uses full overlap weights $\text{scale}_{tk} = 0.5\,P(\text{class}) + \text{cond}_{tk}$ over a weight-shared \texttt{voice\_stem\_proj} (true voice-slot symmetry) and dedicated \texttt{fixed\_stem\_proj}, followed by 2 inter-source attention layers. For stateful streaming exploration (Phase 2), optional carried embeddings \texttt{prev\_slots} are rescaled to match $\|\text{base\_q}\|_2$ before entering a learned sigmoid \texttt{prev\_gate} (bias $+2.0$).
+
+\subsection{Bounded Complex Masking \& Gated In-Model Refiners}
+Six grouped band decoders predict bounded complex masks $M = 2\tanh(\text{raw}/2)$ without mixture-consistency residual dumping (preventing silent slots from absorbing stray vocal energy). Voice slots $v \in \{0,1,2\}$ multiply by a soft activity gate $g_v = \sigma(\text{activity\_logits}_v)$ before iSTFT, followed by an RMS-bounded overlap inpainting 1D conv refiner ($p_{\text{imp}} = 1 - \sigma(\text{solo\_logits})$) and a lightweight gated 2-stage \texttt{CrossResidueEnhancer} ($h=32$, 36k params) that re-applies $g_v$ after both STFT and waveform stages to enforce near-zero silent-slot leakage.
+
+\begin{table}[t]
+\centering
+\caption{Exact parameter distribution of Craft Crosstalk-48k (\texttt{HarmonicSlot-TF v3}, 88.03\,MB \texttt{bf16}).}
+\label{tab:params}
+\small
+\begin{tabular}{lrrl}
+\toprule
+\textbf{Submodule} & \textbf{Parameters} & \textbf{Share} & \textbf{Role} \\
+\midrule
+\texttt{encoder} ($8\times$ DualPath RoPE) & 19,540,992 & 42.36\% & Mixture TF \& global speaker encoding \\
+\texttt{decoder} ($4\times$ DualPath + Inter-Src) & 9,770,496 & 21.18\% & Joint 5-stem refinement \& bleed cancellation \\
+\texttt{band\_enc\_groups} ($6\times$ Grouped) & 6,646,798 & 14.41\% & Variable-width 74-band STFT + harmonic proj \\
+\texttt{slot\_module} (SlotQueryModule v3) & 4,738,180 & 10.27\% & 2-head purity, 3-iter slot attn, \texttt{prev\_gate}, $2\times$ inter-attn \\
+\texttt{band\_dec\_groups} ($6\times$ Grouped) & 4,735,500 & 10.27\% & Symmetric voice + fixed Music/Amb complex masks \\
+\texttt{out\_mlp} + \texttt{activity\_head} & 592,129 & 1.28\% & Pre-mask projection \& voice activity logit \\
+\texttt{harm\_gather} + refiners + pos & 106,368 & 0.23\% & Harmonic comb, band pos, inpaint \& residue refiners \\
+\midrule
+\textbf{Total Stage-1 Model} & \textbf{46,130,463} & \textbf{100.00\%} & \textbf{88.03\,MB (\texttt{bf16}) / 176.1\,MB (\texttt{fp32})} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Hybrid Multi-Objective Loss \& Automated 48\,kHz Dataset Audit}
+\subsection{Training Objective}
+Stage~1 minimizes a composite loss using fast $O(V!)$ L1+SI-SDR permutation matching (\texttt{fast\_pit}) prior to multi-resolution STFT evaluation:
+\begin{equation}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{voice}} + \mathcal{L}_{\text{fixed}} + 1.0\,\mathcal{L}_{\text{xbleed}} + 0.1\,\mathcal{L}_{\text{mix\_cons}} + 0.3\,\mathcal{L}_{\text{act}} + 0.1\,(\mathcal{L}_{\text{cls}} + \mathcal{L}_{\text{solo}}) + 0.2\,\mathcal{L}_{\text{ortho}}.
+\end{equation}
+Each stem core loss combines waveform L1, $0.5\times$ multi-resolution STFT loss ($\text{FFT} \in \{512, 1024, 2048\}$ with $0.3$-power compressed magnitude, complex phase, and TF silent-bin bleed), $1.0\times (0.4\,\text{Whole} + 0.6\,\text{Seg})$ SI-SDR, $1.5\times$ silent-frame RMS bleed, and $0.5\times$ log-RMS loudness matching. $\mathcal{L}_{\text{xbleed}}$ explicitly penalizes interferer-dominant STFT bins ($T_j > 0.10\mu_j \land T_i < 0.15 T_j$) plus $128$\,ms pause-overlap energy windows. $\mathcal{L}_{\text{ortho}}$ penalizes off-diagonal cosine similarity among normalized voice slot embeddings to prevent slot collapse.
+
+\subsection{48\,kHz Dataset Curation \& Multi-Model Purity Audit}
+Every raw file passed an automated multi-model purity audit combining Silero VAD, AudioSet AST, and WavLM-SV speaker verification~\cite{chen2022wavlm} alongside acoustic SNR ($\ge 42$\,dB) and noise-floor ($\le -58$\,dB) gates:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Speech (5 Languages):} OpenSLR 83 (UK English), 65 (Tamil), 66 (Telugu), 68 (Mandarin), and 103 (Hindi) --- 2,378 clean 48\,kHz clips across 152 speakers (9 mislabeled speaker outliers quarantined via WavLM-SV cosine audit), split strictly speaker-disjoint into 137 train / 15 unseen validation speakers.
+    \item \textbf{Music (Full-Band):} 60 vocal-free 48\,kHz FLAC multitrack sums (\texttt{drums+bass+other}) from MUSDB18-HQ~\cite{rafii2019musdb18hq} (2 tracks rejected for hidden vocal bleed at Silero/AST speech probability $0.79/0.71$).
+    \item \textbf{Ambience (Clean):} 16 tracks across 8 speech-free 48\,kHz DEMAND rooms~\cite{thiemann2013demand} (public-chatter rooms excluded; 0 vocal/music contaminants verified).
+    \item \textbf{Room Acoustics:} 400 OpenSLR 28 RIRs (360 train / 40 val), convolved onto $50\%$ of voice tracks.
+\end{itemize}
+Dynamic on-the-fly mixing synthesizes $50\%$ 3-speaker / $50\%$ 2-speaker mixtures, $40\%$ same-language hard pairs, $50\%$ 100\%-simultaneous overlap, $50\%$ strictly dual-mono ($L=R$) mixes to block stereo-panning shortcuts, and $15\%$ silent background dropout.
+
+\section{Stage-2 Full-Bin Cross-Stem De-Bleed Refiner}
+To test whether a dedicated full-resolution post-filter operating at all 1,025 STFT bins (without 74-band compression) can scrub residual crosstalk after a frozen Stage-1 separator, we designed \texttt{CrossStemDebleedRefiner v2} ($8{,}973{,}540$ parameters, $17.95$\,MB \texttt{bf16}: \texttt{voice\_net} $6.36$M, \texttt{bg\_net} $2.60$M, \texttt{voice\_wave\_net} $17.8$k).
+
+\paragraph{Deterministic 5-Reference Permutation-Equivariant Cancellation.}
+For each target voice $v$, the remaining two voices are deterministically ordered by descending RMS energy ($Y_{o1} \ge Y_{o2}$) and paired with Music, Ambience, and Mix to build a 35-channel feature tensor (log-compressed Re/Im of all 6 complex spectra, per-reference log-magnitudes, voice- and full-mix dominance ratios, and all four independent complex phase coherences). For Music ($+1.0$ stem flag) and Ambience ($-1.0$ flag), all three voices are sorted by descending RMS ($Y_{v1} \ge Y_{v2} \ge Y_{v3}$) into a 36-channel tensor for \texttt{bg\_net}. Each U-Net (base channels $48/32$, frequency strides $\times 16$, time strides $\times 4$ on \texttt{down2}/\texttt{down3} preserving full $5.33$\,ms resolution on top skips $h_0, h_1$, plus $3/2$ Dual-Path BiGRU bottleneck blocks) predicts a bounded complex 5-reference filter:
+\begin{equation}
+\hat{Y}_{\text{self}} = \sigma(g + 3.0)(1 + 0.50\,\Delta M_{\text{self}}) Y_{\text{self}} - 0.85\sum_{r=1}^{4} M_r Y_r + 0.35\,M_{\text{mix}} Y_{\text{mix}}.
+\end{equation}
+Near-zero output initialization ($\sigma=5\times 10^{-3}$) yields clean identity pass-through ($\cos = 0.9996$) at step 0 and bit-exact voice-slot permutation equivariance ($\max|\Delta| = 0.00\times 10^0$).
+
+\paragraph{Local-RMS Waveform Polish \& PyTorch cuDNN \texttt{bf16} Fix.}
+After iSTFT, a 3-layer dilated 1D Conv polishes voices using a \emph{local} $5.3$\,ms frame-RMS bound ($\text{avg\_pool1d}$, $k=257$) with negative self-projection stripped---mathematically guaranteeing zero bleed re-injection into scrubbed silent pauses (adversarial pause leak verified at $1.5\times 10^{-7}$, $-136$\,dBFS). During CUDA verification we discovered that PyTorch's cuDNN \texttt{nn.GRU} silently downcasts to \texttt{fp16} inside \texttt{bf16} autocast (without \texttt{GradScaler}), causing $60/182$ bottleneck gradient tensors to underflow to exact zero; wrapping \texttt{\_DualPathBottleneck} in \texttt{autocast(enabled=False)} (\texttt{fp32}) restored $225/225$ non-zero gradients with minimal runtime cost. The refiner trained for 6,000 steps on an A100-40GB ($105.4$\,s / 50 steps) with $10\%$ solo-speaker and $25\%$ carved $1.2$--$2.5$\,s pause augmentation, fixed teacher slot alignment (\texttt{fixed\_perms=[(0,1,2)]}), and an explicit vocal-in-background STFT bleed penalty ($\lambda_{\text{bg\_vb}}=1.5$).
+
+\section{Consumer-GPU Inference Engineering (4.4$\times$ VRAM Reduction)}
+Naive batched inference of a 5-stem 48\,kHz Dual-Path Transformer consumes $8.02$\,GB on 6.0\,s stereo chunks and hits OOM above 8.0\,s on 8\,GB laptop GPUs due to two temporary spikes: (1) \texttt{SlotQueryModule} materializing $[1, 5, T, 74, 768]$ simultaneously across all frames, and (2) the 4-layer decoder batching all 5 stems jointly in \texttt{attn\_f}, \texttt{gru\_t}, and \texttt{ffn}.
+
+Because those operations are pointwise across time or independent per stem, we implemented a strictly inference-only (\texttt{if not self.training:}) execution path in \texttt{ComfyUI-HarmonicSlotTF} using $t_{\text{chunk}}=128$ time-chunked slot FiLM/inter-source attention, sequential per-stem decoder and enhancer loops, and immediate dead-tensor deallocation. Numerical equivalence on trained weights was verified at $\max|\Delta|=8.05\times 10^{-7}$ in \texttt{fp32} (mean $3.10\times 10^{-8}$) and mean $1.68\times 10^{-5}$ in \texttt{bf16}. As shown in Figure~\ref{fig:vram} and Table~\ref{tab:vram}, peak RTX~4060 Laptop 8\,GB VRAM drops by $76.6$--$77.2\%$, making chained Stage-1 + Stage-2 inference run at \textbf{$1.30\times$ real-time} ($4.61$\,s per 6.0\,s stereo chunk).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig4_vram_latency.png}
+\caption{Measured NVIDIA GeForce RTX~4060 Laptop (8\,GB VRAM) \texttt{bf16} inference benchmarks. Eliminating WDDM system-RAM spillover slashes Stage-1 peak VRAM by $77\%$ ($10.60 \to 2.42$\,GB at 8\,s), while full chained Stage-1 + Stage-2 inference processes 6.0\,s 48\,kHz stereo chunks in $4.61$\,s ($1.30\times$ faster than real-time).}
+\label{fig:vram}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Measured RTX~4060 Laptop 8\,GB VRAM \& latency (\texttt{bf16}) across chunk lengths.}
+\label{tab:vram}
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Stage / Chunk} & \textbf{Naive Alloc / Res} & \textbf{Optimized Alloc / Res} & \textbf{VRAM Saved} & \textbf{Naive Time} & \textbf{Optimized Time} \\
+\midrule
+Stage 1 (4.0\,s) & 5.44 / 7.96\,GB & \textbf{1.33 / 1.90\,GB} & $-75.6\%$ & 3.30\,s & \textbf{2.31\,s} ($1.43\times$) \\
+Stage 1 (6.0\,s) & 8.02 / 11.43\,GB & \textbf{1.88 / 2.61\,GB} & $-76.6\%$ & 4.70\,s & \textbf{3.26\,s} ($1.44\times$) \\
+Stage 1 (8.0\,s) & 10.60 / 15.07\,GB & \textbf{2.42 / 3.20\,GB} & $-77.2\%$ & 10.44\,s & \textbf{4.36\,s} ($2.39\times$) \\
+Stage 1 (10.0\,s / 12.0\,s) & OOM / OOM & \textbf{2.96 / 3.51\,GB} & Unlocked & OOM & \textbf{5.44\,s / 6.60\,s} \\
+Stage 2 Refiner (4.0\,s / 6.0\,s) & --- & \textbf{1.75 / 2.59\,GB} & --- & --- & \textbf{0.92\,s / 1.35\,s} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Experimental Results \& Honest Failure Analysis}
+
+\subsection{Phase-1 Training Dynamics (Steps $5{,}000 \to 17{,}000$)}
+Phase~1 trained on an NVIDIA A100-SXM4-80GB (\texttt{batch=4}, 4.0\,s stereo, \texttt{bf16}, AdamW $\text{lr}=3\times 10^{-4}$ cosine, EMA $0.999$). Figure~\ref{fig:curves} and Table~\ref{tab:main_results} report exact EMA validation metrics on 15 completely unseen speakers, unseen music, unseen ambience, and unseen RIRs ($50\%$ dual-mono). Phase~1 climbs monotonically to $9.22$\,dB 2-speaker SI-SDR, $10.14$\,dB 100\%-overlap 2-speaker SI-SDR, $4.93$\,dB 100\%-overlap 3-speaker SI-SDR, $16.7$\,dB voice SIR, $6.03$\,dB music, and $10.09$\,dB ambience at step 17,000.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1_training_curves.png}
+\caption{Complete Phase-1 ($5\text{k} \to 17\text{k}$) and Phase-2 ($17.25\text{k} \to 21\text{k}$) EMA validation trajectories on held-out unseen speakers, music, ambience, and RIRs.}
+\label{fig:curves}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Exact held-out EMA validation progression across Phase 1 (independent 4\,s chunks) and Phase 2 (stateful paired chunks).}
+\label{tab:main_results}
+\small
+\begin{tabular}{lcccccccccc}
+\toprule
+\textbf{Phase / Step} & \textbf{2spk} & \textbf{ov2} & \textbf{3spk} & \textbf{ov3} & \textbf{SIR} & \textbf{Music} & \textbf{Amb} & \textbf{Swap} & \textbf{Gap-Swap} & \textbf{Unused} \\
+\midrule
+Phase 1 (5,000) & 2.10 & 3.53 & $-1.95$ & $-1.79$ & 8.8 & 3.13 & 7.07 & --- & --- & $-30.9$ \\
+Phase 1 (10,000) & 7.22 & 8.05 & 0.24 & 0.75 & 12.6 & 5.48 & 9.30 & --- & --- & $-41.2$ \\
+Phase 1 (15,500) & 9.06 & 9.86 & 3.15 & 4.13 & 15.9 & 5.98 & 10.05 & --- & --- & $-58.9$ \\
+\textbf{Phase 1 (17,000)} & \textbf{9.22} & 10.14 & 3.53 & 4.93 & 16.7 & 6.03 & 10.09 & 37.5\% & --- & $-58.9$ \\
+\midrule
+Phase 2 (17,250) & 8.77 & 10.01 & 3.62 & 4.28 & 15.7 & 6.00 & 10.01 & 41.7\% & 33.3\% & $-58.5$ \\
+Phase 2 (18,500) & 8.95 & 10.00 & 2.93 & 3.99 & 15.4 & 6.02 & 10.21 & \textbf{12.5\%} & 20.8\% & $-58.8$ \\
+Phase 2 (19,000) & 9.00 & 10.01 & 3.19 & 4.63 & 16.1 & 6.02 & 10.09 & 25.0\% & \textbf{12.5\%} & $-58.9$ \\
+Phase 2 (20,250) & 9.18 & 10.23 & 3.58 & 5.45 & 17.0 & 6.07 & 10.11 & 33.3\% & \textbf{12.5\%} & $-58.9$ \\
+\textbf{Phase 2 (21,000)} & 9.13 & \textbf{10.25} & \textbf{3.68} & \textbf{5.75} & \textbf{17.4} & \textbf{6.12} & \textbf{10.11} & 33.3\% & 16.7\% & $-59.6$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Negative Finding \#1: Phase-2 Streaming Single-Slot Collapse on Real YouTube Audio}
+On synthetic held-out benchmarks (Table~\ref{tab:main_results}), Phase~2 (steps $17\text{k} \to 21\text{k}$, paired 4\,s/6\,s chunks with split-backward \texttt{prev\_slots}) appeared strictly superior: 3-speaker overlap jumped $+0.82$\,dB ($4.93 \to 5.75$\,dB), SIR reached $17.4$\,dB, and 2.0\,s silence-gap swap dropped from $33.3\%$ to $12.5$--$16.7\%$.
+
+\textbf{However, testing on real-world compressed YouTube shouting audio revealed a severe failure mode} (Figure~\ref{fig:ood} and Table~\ref{tab:ood}). On both a 12\,s two-speaker argument from \emph{Kitchen Nightmares} (128\,kbps MP3) and a noisy multi-speaker \emph{Delhi Metro} clip, Phase~2 collapsed both speakers into a single output slot ($V_3$) while suppressing $V_2$ by $20$--$27$\,dB ($-58.3$\,dBFS and $-49.7$\,dBFS). Disabling \texttt{carry\_slots} at inference (\texttt{stream=OFF}) immediately rescued \emph{Kitchen Nightmares} ($V_2: -58.3 \to -33.6$\,dBFS), proving an asymmetric hot/cold \texttt{carry\_slots} failure when Chunk~1 activates only one slot above threshold and starves cold queries on Chunk~2. Even with \texttt{stream=OFF}, however, Phase~2 still collapsed \emph{Delhi Metro} ($V_2 = -49.3$\,dBFS), whereas Phase~1 cleanly separated both real clips ($V_2 = -31.4$ / $-29.2$\,dBFS, $V_3 = -33.1$ / $-24.8$\,dBFS). We attribute this second mechanism to Phase~2's single-speaker/gap chunk regime inducing a conservative collapse bias under out-of-domain codec compression and camera-mic reverberation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig2_domain_collapse_ab.png}
+\caption{\textbf{Honest OOD Failure Analysis.} Left: On real 128\,kbps YouTube arguments, Phase~2 collapses both speakers into $V_3$ ($V_2$ drops to $-58.3 / -49.3$\,dBFS), whereas Phase~1 cleanly separates both speakers. Right: When fed Phase~1's separated stems, Refiner~v2 reduces quiet-frame bleed floor by $-14.1$ to $-21.9$\,dB and cuts $V_2$--$V_3$ envelope correlation on \emph{Kitchen Nightmares} by $56\%$ ($0.303 \to 0.132$).}
+\label{fig:ood}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Real-world out-of-domain 128\,kbps YouTube diagnostic (12\,s clips, RMS in dBFS).}
+\label{tab:ood}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Pipeline} & \multicolumn{3}{c}{\textbf{Kitchen Nightmares (12\,s)}} & \multicolumn{3}{c}{\textbf{Delhi Metro Fight (12\,s)}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+ & $V_2$ / $V_3$ RMS & Pause Floor & $V_2$--$V_3$ Corr & $V_2$ / $V_3$ RMS & Pause Floor & $V_2$--$V_3$ Corr \\
+\midrule
+Phase 1 (16.5k) & $-31.4$ / $-33.1$ & $-67.7$ / $-67.8$ & 0.303 & $-29.2$ / $-24.8$ & $-45.5$ / $-55.2$ & 0.069 \\
+Phase 2 (21k, str=ON) & \textcolor{red!70!black}{$-58.3$} / $-29.5$ & --- & \emph{Collapsed} & \textcolor{red!70!black}{$-49.7$} / $-25.5$ & --- & \emph{Collapsed} \\
+Phase 2 (21k, str=OFF) & $-33.6$ / $-32.6$ & --- & Split & \textcolor{red!70!black}{$-49.3$} / $-25.9$ & --- & \emph{Collapsed} \\
+\textbf{Phase 1 + Refiner (6k)} & \textbf{$-31.3$ / $-32.8$} & \textbf{$-86.3$ / $-83.4$} & \textbf{0.132} & \textbf{$-28.6$ / $-24.6$} & \textbf{$-59.6$ / $-77.1$} & \textbf{$-0.061$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Negative Finding \#2: Conv U-Net Refiner Excels on Silence/Background, Plateaus on Simultaneous Overlap}
+Figure~\ref{fig:refiner} and Table~\ref{tab:refiner_ab} evaluate \texttt{CrossStemDebleedRefiner v2} (step 6,000) chained after an unseen Stage-1 checkpoint (step 20,250) on held-out unseen speakers. The refiner delivers dramatic reductions on pause ghost bleed ($-46.0 \to -65.1$\,dBFS, $-19.1$\,dB, boosting pause-clip SI-SDR from $0.44 \to 6.41$\,dB), solo empty slots ($-74.6 \to -118.9$\,dBFS while improving solo SI-SDR $14.33 \to 14.43$\,dB), and vocal leakage inside Music and Ambience ($-35\%$ to $-42\%$).
+
+\textbf{Critically, however, on 100\% simultaneous active overlap, SIR improved by only $+2.2$\,dB (2-speaker) and $+2.4$\,dB (3-speaker)}, with 2-speaker overlap SI-SDR shifting $-0.11$\,dB ($8.68 \to 8.57$\,dB). From a perceptual post-production standpoint, users can already suppress pause bleed with standard noise gates or expanders; eliminating audible \emph{simultaneous} crosstalk requires $+6$ to $+12$\,dB overlap gain. Our experiments identify two clear causes for this plateau: (1) a 2D Conv U-Net with $16\times$ frequency downsampling lacks global full-bin cross-frequency harmonic attention needed to untangle interleaved pitch combs during simultaneous speech; and (2) heavy silent-frame weighting ($\lambda_{\text{bleed}}=3.0$) makes pause gating the lowest-resistance optimization path.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_refiner_ab.png}
+\caption{Left: \texttt{CrossStemDebleedRefiner v2} (17.95\,MB) validation SIR and unused-slot trajectory across 6,000 A100-40GB steps. Right: Honest gain breakdown contrasting dramatic silence/pause/background cleanup ($+19.1$ to $+44.3$\,dB) against the $+2.2$--$2.4$\,dB simultaneous-overlap ceiling of a Conv U-Net post-filter.}
+\label{fig:refiner}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Unseen-speaker BEFORE vs AFTER evaluation of Stage-2 Refiner v2 (step 6,000) on an unseen Stage-1 teacher (step 20,250).}
+\label{tab:refiner_ab}
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Evaluation Regime (Unseen Speakers)} & \textbf{Metric} & \textbf{Stage 1 Only} & \textbf{+ Refiner v2 (6k)} & \textbf{Delta} \\
+\midrule
+Pause-Gap Torture (2.0\,s silent pause) & Ghost Bleed / Spk1 SDR & $-46.0$\,dBFS / 0.44\,dB & \textbf{$-65.1$\,dBFS / 6.41\,dB} & \textbf{$-19.1$\,dB / $+5.97$\,dB} \\
+Solo Speaker (1 voice + Mus + Amb) & Voice SDR / Empty Slots & 14.33\,dB / $-74.6$\,dBFS & \textbf{14.43\,dB / $-118.9$\,dBFS} & \textbf{$+0.10$\,dB / $-44.3$\,dB} \\
+2-Speaker Normal (4\,s) & SIR / Unused / BG Leak & 17.0\,dB / $-55.0$ / 0.190 & \textbf{18.8\,dB / $-75.4$ / 0.124} & $+1.7$\,dB / $-20.4$\,dB / $-35\%$ \\
+2-Speaker 100\% Overlap & SIR / SDR / BG Leak & 20.5\,dB / 8.68 / 0.142 & 22.7\,dB / 8.57 / \textbf{0.084} & $+2.2$\,dB / $-0.11$\,dB / $-41\%$ \\
+3-Speaker 100\% Overlap & SIR / SDR / BG Leak & 14.5\,dB / 4.42 / 0.177 & \textbf{16.8\,dB / 4.54 / 0.103} & $+2.4$\,dB / $+0.13$\,dB / $-42\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Limitations, Open-Source Release \& v4 Research Roadmap}
+\subsection{Key Limitations Identified}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Dataset Scale \& Domain Mismatch:} Training on 137 studio audiobook speakers (2,378 clips) leaves a large gap against emotional shouting, crowded reverberant rooms, and lossy 128\,kbps MP3/AAC YouTube codecs.
+    \item \textbf{High-Frequency Band Granularity:} Grouping 24--64 bins above 4.6\,kHz limits fine sibilant separation during 3-speaker simultaneous overlap.
+    \item \textbf{Decoupling Speaker Tracking from Separation:} End-to-end streaming slot memory (\texttt{prev\_slots}) risks OOD slot collapse; cross-chunk speaker locking should instead be performed externally by a frozen pretrained speaker verification model (e.g., WavLM-SV / ECAPA-TDNN) operating on Phase-1 separated stems.
+\end{enumerate}
+
+\subsection{Open-Source Release \& Community-Funded v4 Roadmap}
+All training scripts, inference code, 4-node ComfyUI plugin (\texttt{ComfyUI-HarmonicSlotTF}), pre-wired 2-stage workflow, and all three \texttt{bf16} checkpoints (Phase-1 step~17,000 [recommended], Phase-2 step~21,000 [research], and Refiner~v2 step~6,000) are released openly: code under \textbf{MIT License}, research weights under \textbf{CC BY-NC-SA 4.0} (respecting MUSDB18-HQ, OpenSLR~68, and OpenSLR~103 terms; raw audio is never redistributed).
+
+This research was conducted independently without institutional GPU funding. Community sponsorships directly fund the \textbf{Craft Crosstalk-48k v4} training run targeting genuine simultaneous-overlap elimination:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Milestone 1 (Data \& Codec Realism):} Scale from 137 to $1{,}000+$ diverse CC0/CC-BY speakers (LibriTTS-R, VCTK, Common Voice, emotional/shouting speech, Slakh2100/Freesound CC0 for commercially clean weights) with live MP3/AAC/Opus codec, mic-EQ, and reverberant room augmentation.
+    \item \textbf{Milestone 2 (Full-Resolution Simultaneous Overlap Architecture):} Upgrade high-frequency band resolution ($>4.6$\,kHz) and add TF-GridNet-style full-bin cross-frequency attention with active-overlap-focused harmonic loss rather than silent-frame gating.
+    \item \textbf{Milestone 3 (Zero-Collapse Long-Audio Tracking):} Integrate pretrained neural speaker-verification embeddings directly into ComfyUI OLA chunking so multi-minute videos lock speakers cleanly without Phase-2 slot collapse.
+\end{itemize}
+
+\bibliographystyle{plain}
+\bibliography{references}
+\end{document}

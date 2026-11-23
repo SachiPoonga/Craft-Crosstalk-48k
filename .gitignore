@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+release_assets/*.safetensors
+.DS_Store
+Thumbs.db
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
