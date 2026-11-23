@@ -3,10 +3,12 @@
 [![License: MIT](https://img.shields.io/badge/Code%20%26%20Nodes-MIT-blue.svg)](LICENSE)
 [![Weights: CC BY-NC-SA 4.0](https://img.shields.io/badge/Research%20Weights-CC%20BY--NC--SA%204.0-teal.svg)](WEIGHTS_LICENSE.md)
 [![Paper](https://img.shields.io/badge/Technical%20Paper-PDF%20%2B%20LaTeX-purple.svg)](paper/Craft_Crosstalk_48k_Paper.pdf)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Weights%20%26%20Paper-yellow.svg)](https://huggingface.co/sachusam/Craft-Crosstalk-48k)
+[![Ko-fi](https://img.shields.io/badge/Support%20v4%20GPU%20Compute-Ko--fi-ff5e5b.svg)](https://ko-fi.com/sachipoonga)
 
 **Single-pass 48 kHz stereo 5-stem neural audio separation (`Voice 1`, `Voice 2`, `Voice 3`, `Music`, `Ambience`) with 4.4× VRAM-optimized ComfyUI nodes (1.88 GB peak VRAM on an RTX 4060 8 GB laptop GPU) and an honest empirical analysis of streaming slot collapse & full-bin post-filtering.**
 
-📄 **Read the Full Technical Paper:** [Craft_Crosstalk_48k_Paper.pdf](paper/Craft_Crosstalk_48k_Paper.pdf) | [arXiv LaTeX Source](paper/main.tex)
+📄 **Read the Full Technical Paper:** [Craft_Crosstalk_48k_Paper.pdf](paper/Craft_Crosstalk_48k_Paper.pdf) | [arXiv LaTeX Source](paper/main.tex) | 🤗 **Hugging Face Weights:** [sachusam/Craft-Crosstalk-48k](https://huggingface.co/sachusam/Craft-Crosstalk-48k)
 
 ---
 
