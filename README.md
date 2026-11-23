@@ -20,9 +20,28 @@ Open-source neural audio separation is split into two incompatible worlds:
 
 ---
 
+## System Architecture (Stage 1 + Stage 2)
+
+Craft Crosstalk-48k combines **Stage 1 (`HarmonicSlot-TF v3`, 46.13M params)** with an optional **Stage 2 Full-1,025-Bin Post-Filter (`CrossStemDebleedRefiner v2`, 8.97M params)**:
+
+![End-to-End Pipeline Architecture](paper/figures/fig_arch1_system_pipeline.png)
+
+<details>
+<summary><b>Internal Schematics: DualPathBandBlock, SlotQueryModule v3 & Stage-2 5-Reference U-Net</b></summary>
+
+#### Stage 1 Internal Modules (`DualPathBandBlock` & Purity-Guided `SlotQueryModule v3`)
+![HarmonicSlot-TF v3 Internals](paper/figures/fig_arch2_harmonicslot_block.png)
+
+#### Stage 2 Full-1,025-Bin 5-Reference De-Bleed Refiner (`CrossStemDebleedRefiner v2`)
+![CrossStemDebleedRefiner v2 U-Net](paper/figures/fig_arch3_refiner_unet.png)
+
+</details>
+
+---
+
 ## Published Checkpoints (GitHub Releases)
 
-Download all checkpoints from the **[Releases](../../releases)** tab and place them into `ComfyUI/models/audiosep/audiosep_48k/`:
+Download all checkpoints from the **[Releases](https://github.com/SachiPoonga/Craft-Crosstalk-48k/releases)** tab and place them into `ComfyUI/models/audiosep/audiosep_48k/`:
 
 | Checkpoint | Size (`bf16`) | Purpose & Honest Recommendation |
 |---|---:|---|
@@ -71,7 +90,8 @@ This entire project — dataset auditing, 48 kHz architecture, 4.4× VRAM optimi
 - **Milestone 3 (`$250`):** Complete `v4` A100 training + external pretrained neural speaker verification (`WavLM-SV`) chunk locking for zero-swap, zero-collapse multi-minute separation.
 
 If this research, codebase, or ComfyUI plugin helps you, please consider supporting continued GPU compute:
-- **GitHub Sponsors / Ko-fi / BuyMeACoffee:** *(Add your sponsor link here)*
+- **Ko-fi (PayPal / Card):** https://ko-fi.com/sachipoonga
+- **Repository & Releases:** https://github.com/SachiPoonga/Craft-Crosstalk-48k
 - **Contact / Collaboration:** `sachipoonga@gmail.com`
 
 ---
@@ -81,9 +101,9 @@ If this research, codebase, or ComfyUI plugin helps you, please consider support
 ```bibtex
 @misc{craftcrosstalk48k2026,
   title  = {Craft Crosstalk-48k (HarmonicSlot-TF v3): Unified Single-Pass 48 kHz Stereo Multi-Voice, Music, and Ambience Separation with Consumer-GPU Inference and Empirical Analysis of Streaming Collapse and Full-Bin Post-Filtering},
-  author = {Independent Open-Source Audio Research (storytold)},
+  author = {Sachi Poonga (SachiPoonga / storytold)},
   year   = {2026},
-  howpublished = {\url{https://github.com/storytold/Craft-Crosstalk-48k}}
+  howpublished = {\url{https://github.com/SachiPoonga/Craft-Crosstalk-48k}}
 }
 ```
 

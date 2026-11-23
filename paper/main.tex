@@ -19,8 +19,8 @@
 \title{\textbf{Craft Crosstalk-48k (HarmonicSlot-TF v3 \& CrossStemDebleedRefiner v2):\\Unified Single-Pass 48\,kHz Stereo Multi-Voice, Music, and Ambience Separation with 4.4$\times$ Consumer-GPU VRAM Engineering and Empirical Failure Analysis of Stateful Streaming \& Full-Bin Post-Filtering}}
 
 \author{
-  Independent Open-Source Audio Research (\texttt{storytold})\\
-  \texttt{sachipoonga@gmail.com} \quad|\quad Open-Source R\&D Compute Fund: Ko-fi \& PayPal
+  Sachi Poonga (\texttt{SachiPoonga} / \texttt{storytold}) --- Independent Open-Source Audio Research\\
+  \texttt{sachipoonga@gmail.com} \quad|\quad Code: \url{https://github.com/SachiPoonga/Craft-Crosstalk-48k} \quad|\quad Support: \url{https://ko-fi.com/sachipoonga}
 }
 \date{November 2026}
 
@@ -41,6 +41,15 @@ In real-world broadcast, film, YouTube, and podcast recordings, multiple speaker
 \textbf{Craft Crosstalk-48k} solves 5-stem 48\,kHz stereo separation in a single forward pass on 8\,GB consumer GPUs. This paper documents our complete architectural evolution, mathematical formulations, automated dataset purity pipeline, systems engineering discoveries, and unfiltered negative findings.
 
 \section{Architectural Evolution: From 16\,kHz Ablations \& v2 to v3}
+Figure~\ref{fig:arch1} presents the complete end-to-end two-stage pipeline combining Stage~1 (\texttt{HarmonicSlot-TF v3}) and Stage~2 (\texttt{CrossStemDebleedRefiner v2}).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_arch1_system_pipeline.png}
+\caption{End-to-end two-stage \textbf{Craft Crosstalk-48k} signal flow: 48\,kHz stereo STFT $\to$ 7-channel acoustic physics + $6\times f_0$ integer-harmonic comb $\to$ 6 fused variable-band encoders $\to$ 8-layer Dual-Path 1D-RoPE Encoder $\to$ \texttt{SlotQueryModule v3} $\to$ 4-layer Inter-Source Decoder $\to$ optional Stage-2 full-1,025-bin 5-reference U-Net post-filter.}
+\label{fig:arch1}
+\end{figure}
+
 We first validated competitive slot queries at 16\,kHz mono (\texttt{n\_fft=512, hop=128, D=128, 4 enc / 2 dec}) across three controlled modes: (1) \texttt{"plain"} (linear 5-stem projection without slot attention), which collapsed to \textbf{0.59\,dB} SI-SDR at step 15,000 due to permutation symmetry across identical voice heads; (2) \texttt{"queries"} (SepTDA-style competitive speaker slots + semantic Music/Ambience queries); and (3) \texttt{"purity\_queries"} (adding a decoupled 2-head class/solo-speaker purity gate), which reached \textbf{13.79\,dB (v2) $\to$ 15.56\,dB (v3)} on rapid quality benchmarks.
 
 Scaling to full-band \textbf{48\,kHz stereo} initially exposed six bottlenecks in \texttt{HarmonicSlot-TF v2} ($D=128$, 4 enc / 2 dec, 10.1M params, trained 29,000 steps to $4.92$\,dB mean SI-SDR). Table~\ref{tab:v2_vs_v3} details how each limitation was resolved in \texttt{HarmonicSlot-TF v3} (46.13M params, $7.20$\,dB mean SI-SDR).
@@ -101,7 +110,14 @@ The \textbf{8-layer Dual-Path Encoder} ($19.54$M params, 8 heads, $d_h=48$) appl
 \end{table}
 
 \subsection{Decoupled 2-Head Purity-Guided SlotQueryModule \& Gated Synthesis}
-Given encoder tokens $z \in \mathbb{R}^{B \times T \times 74 \times 384}$ ($N=T\cdot 74$), \texttt{SlotQueryModule} predicts 3-class probabilities $P_{\text{cls}}(t,k) = \operatorname{softmax}(\text{MLP}_{\text{cls}}(z_{t,k}))$ and solo-speaker dominance $P_{\text{solo}}(t,k) = \sigma(\text{MLP}_{\text{solo}}(z_{t,k}))$. Clean voiceprint pooling weights $w_{\text{pool},v}^{(m)} = A_v^{(m)} \odot (P_{\text{speech}}\cdot P_{\text{solo}})$ update speaker slots over 3 GRU iterations with zero-mean voice re-anchoring, while final FiLM modulation preserves full overlap bandwidth via $\text{scale}_{s,t,k} = 0.5\,P_{\text{cls},s}(t,k) + \text{cond}_{s,t,k}$ over symmetric \texttt{voice\_stem\_proj} and \texttt{fixed\_stem\_proj}. Decoded tokens map to bounded complex masks $M = 2\tanh(\text{raw}/2)$, soft activity gate $g_v = \sigma(\text{activity\_logits}_v)$, overlap inpainting refiner, and a gated 2-stage \texttt{CrossResidueEnhancer} (36k params).
+Figure~\ref{fig:arch2} illustrates the internal tensor wiring of both the Dual-Path 1D-RoPE backbone block and the purity-guided \texttt{SlotQueryModule v3}. Given encoder tokens $z \in \mathbb{R}^{B \times T \times 74 \times 384}$ ($N=T\cdot 74$), \texttt{SlotQueryModule} predicts 3-class probabilities $P_{\text{cls}}(t,k) = \operatorname{softmax}(\text{MLP}_{\text{cls}}(z_{t,k}))$ and solo-speaker dominance $P_{\text{solo}}(t,k) = \sigma(\text{MLP}_{\text{solo}}(z_{t,k}))$. Clean voiceprint pooling weights $w_{\text{pool},v}^{(m)} = A_v^{(m)} \odot (P_{\text{speech}}\cdot P_{\text{solo}})$ update speaker slots over 3 GRU iterations with zero-mean voice re-anchoring, while final FiLM modulation preserves full overlap bandwidth via $\text{scale}_{s,t,k} = 0.5\,P_{\text{cls},s}(t,k) + \text{cond}_{s,t,k}$ over symmetric \texttt{voice\_stem\_proj} and \texttt{fixed\_stem\_proj}. Decoded tokens map to bounded complex masks $M = 2\tanh(\text{raw}/2)$, soft activity gate $g_v = \sigma(\text{activity\_logits}_v)$, overlap inpainting refiner, and a gated 2-stage \texttt{CrossResidueEnhancer} (36k params).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_arch2_harmonicslot_block.png}
+\caption{Internal module schematics: (A) \texttt{DualPathBandBlock} showing Band 1D-RoPE attention, Time BiGRU, Encoder global RoPE / Decoder per-$(t,k)$ inter-source attention, and SiLU FFN; (B) \texttt{SlotQueryModule v3} showing decoupled purity pooling ($P_{\text{solo}}$ isolated from FiLM) and symmetric subspace conditioning.}
+\label{fig:arch2}
+\end{figure}
 
 \section{Hybrid Multi-Objective Loss \& Automated 48\,kHz Dataset Audit}
 Stage~1 minimizes:
@@ -116,7 +132,14 @@ All training files passed an automated multi-model ML Purity Audit (Silero VAD +
 \hat{Y}_{\text{self}} &= \sigma(g_{\text{raw}} + 3.0)(1 + 0.50\,\Delta M_{\text{self}}) Y_{\text{self}} - 0.85\sum_{r=1}^{4} M_r Y_r + 0.35\,M_{\text{mix}} Y_{\text{mix}}, \\
 \delta_{\text{wave}}(t) &= 0.15 \cdot \sqrt{\operatorname{AvgPool1d}_{k=257}(y^2)(t) + 10^{-12}} \cdot \tanh(\operatorname{Conv1d}([y, y_{\text{other}}, \text{bg}, \text{mix}])).
 \end{align}
-Wrapping \texttt{\_DualPathBottleneck} in \texttt{autocast(enabled=False)} (\texttt{fp32}) prevented PyTorch cuDNN \texttt{nn.GRU} from silently downcasting to \texttt{fp16} under \texttt{bf16} autocast (fixing $60/182$ zero-gradient tensors to $225/225$ non-zero gradients), while local-RMS gating reduced adversarial silent-pause leakage to $1.5\times 10^{-7}$ ($-136$\,dBFS).
+Wrapping \texttt{\_DualPathBottleneck} in \texttt{autocast(enabled=False)} (\texttt{fp32}) prevented PyTorch cuDNN \texttt{nn.GRU} from silently downcasting to \texttt{fp16} under \texttt{bf16} autocast (fixing $60/182$ zero-gradient tensors to $225/225$ non-zero gradients), while local-RMS gating reduced adversarial silent-pause leakage to $1.5\times 10^{-7}$ ($-136$\,dBFS). Figure~\ref{fig:arch3} depicts the complete Stage-2 U-Net and reference-sorting architecture.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_arch3_refiner_unet.png}
+\caption{Architecture of \texttt{CrossStemDebleedRefiner v2} ($8.97$M params): deterministic descending-RMS 5-reference ordering, full-1,025-bin asymmetric-stride 2D U-Net with \texttt{fp32}-protected dual-axis bottleneck BiGRUs, 5-reference complex cancellation, and $5.3$\,ms local-RMS 1D waveform polish.}
+\label{fig:arch3}
+\end{figure}
 
 \section{Consumer-GPU Inference Engineering (4.4$\times$ VRAM Reduction)}
 Eliminating transient 5-stem materialization spikes via eval-only time-chunked slot conditioning ($t_{\text{chunk}}=128$), sequential per-stem decoder/enhancer loops, and immediate dead-tensor deallocation achieved verified FP32 numerical equivalence ($\max|\Delta|=8.05\times 10^{-7}$, mean $3.10\times 10^{-8}$) while cutting peak RTX~4060 Laptop 8\,GB VRAM by $76.6$--$77.2\%$ ($8.02 \to 1.88$\,GB at 6.0\,s; Figure~\ref{fig:vram}). Full chained Stage-1 + Stage-2 inference completes 6.0\,s 48\,kHz stereo chunks in $4.61$\,s ($1.30\times$ real-time).
@@ -186,7 +209,7 @@ As shown in Figure~\ref{fig:refiner}, chaining \texttt{CrossStemDebleedRefiner v
 \end{figure}
 
 \section{Open-Source Release \& Community-Funded v4 Roadmap}
-All code, four ComfyUI nodes (\texttt{ComfyUI-HarmonicSlotTF}), pre-wired workflows, and all three \texttt{bf16} checkpoints (\texttt{phase1\_step17000} [SHA-256 \texttt{d75bfb4d...}], \texttt{phase2\_step21000} [\texttt{a0f655c8...}], and \texttt{refiner\_v2\_step6000} [\texttt{af203b3b...}]) are released openly (MIT for code/nodes; CC BY-NC-SA 4.0 for research weights). Community sponsorships via Ko-fi and PayPal directly fund \textbf{Craft Crosstalk-48k v4}: (1) scaling from 137 to $1{,}000+$ diverse CC0/CC-BY speakers with shouting and MP3/AAC codec augmentation; (2) full-resolution $>4.6$\,kHz bands + TF-GridNet-style full-bin cross-frequency harmonic attention trained specifically on simultaneous overlap; and (3) external frozen neural speaker verification (\texttt{WavLM-SV}) inside ComfyUI OLA for zero-collapse long-audio tracking.
+All code, four ComfyUI nodes (\texttt{ComfyUI-HarmonicSlotTF}), pre-wired workflows, and all three \texttt{bf16} checkpoints (\texttt{phase1\_step17000} [SHA-256 \texttt{d75bfb4d...}], \texttt{phase2\_step21000} [\texttt{a0f655c8...}], and \texttt{refiner\_v2\_step6000} [\texttt{af203b3b...}]) are released openly at \url{https://github.com/SachiPoonga/Craft-Crosstalk-48k} (MIT for code/nodes; CC BY-NC-SA 4.0 for research weights). Community sponsorships via Ko-fi (\url{https://ko-fi.com/sachipoonga}) and PayPal directly fund \textbf{Craft Crosstalk-48k v4}: (1) scaling from 137 to $1{,}000+$ diverse CC0/CC-BY speakers with shouting and MP3/AAC codec augmentation; (2) full-resolution $>4.6$\,kHz bands + TF-GridNet-style full-bin cross-frequency harmonic attention trained specifically on simultaneous overlap; and (3) external frozen neural speaker verification (\texttt{WavLM-SV}) inside ComfyUI OLA for zero-collapse long-audio tracking.
 
 \bibliographystyle{plain}
 \bibliography{references}
